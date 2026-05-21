@@ -10,21 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRunWorkerClaimsAndCompletesAJob(t *testing.T) {
+func TestRunWorkerClaimsAndCompletesOneJob(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
+	mock.MatchExpectationsInOrder(false)
 
 	q, err := New(db, Config{
 		QueueName:      "test",
 		WorkerID:       "worker-1",
 		Concurrency:    1,
-		PollInterval:   5 * time.Millisecond,
+		PollInterval:   1 * time.Millisecond,
 		ReaperInterval: 1 * time.Hour,
 		LeaseTTL:       5 * time.Minute,
 	})
 	require.NoError(t, err)
 
-	// StartReaper eager pass.
 	mock.ExpectBegin()
 	mock.ExpectExec(`UPDATE`).
 		WithArgs(durationToSecs(q.cfg.BackoffBase), durationToSecs(q.cfg.BackoffMax), q.cfg.QueueName).
@@ -34,7 +34,6 @@ func TestRunWorkerClaimsAndCompletesAJob(t *testing.T) {
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectCommit()
 
-	// Claim flow for one job.
 	mock.ExpectBegin()
 	mock.ExpectQuery(`SELECT id FROM`).
 		WithArgs(q.cfg.QueueName, 1).
@@ -58,18 +57,26 @@ func TestRunWorkerClaimsAndCompletesAJob(t *testing.T) {
 		))
 	mock.ExpectCommit()
 
-	// Complete.
 	mock.ExpectExec(`UPDATE`).
 		WithArgs(int64(10), q.cfg.WorkerID).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
 
-	q.RunWorker(ctx, func(ctx context.Context, job Job) error {
-		return nil
-	})
+	go func() {
+		defer close(done)
+		q.RunWorker(ctx, func(ctx context.Context, job Job) error {
+			cancel()
+			return nil
+		})
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunWorker did not exit")
+	}
 
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
-

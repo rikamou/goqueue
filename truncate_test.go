@@ -3,6 +3,7 @@ package goqueue
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -18,10 +19,6 @@ func TestTruncateErrMsgTruncatesAtRuneBoundary(t *testing.T) {
 	in := prefix + "€" + strings.Repeat("b", 10)
 
 	out := truncateErrMsg(in)
-	assert.LessOrEqual(t, len(out), maxErrMsgLen+len("...(truncated)"))
-	assert.True(t, strings.HasSuffix(out, "...(truncated)"))
-	// Result must remain valid UTF-8 (implicitly, because Go strings are UTF-8 and we didn't panic),
-	// but also ensure the "€" wasn't partially included.
-	assert.NotContains(t, out, "\uFFFD")
+	assert.True(t, utf8.ValidString(out))
+	assert.Equal(t, prefix+"...(truncated)", out)
 }
-

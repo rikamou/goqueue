@@ -99,4 +99,3 @@ func TestClaimSelectsIDsUpdatesAndFetchesRows(t *testing.T) {
 
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
-

@@ -33,4 +33,3 @@ func TestAutoMigrateExecutesDDL(t *testing.T) {
 	require.NoError(t, q.AutoMigrate(context.Background()))
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
-

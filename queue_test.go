@@ -163,6 +163,19 @@ func TestCompleteReturnsErrNotClaimedOnZeroRows(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestCompleteReturnsWrappedErrorOnExecFailure(t *testing.T) {
+	q, mock := newMockDB(t)
+
+	mock.ExpectExec(`UPDATE`).
+		WithArgs(int64(99), q.cfg.WorkerID).
+		WillReturnError(assert.AnError)
+
+	err := q.Complete(context.Background(), 99)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "goqueue: complete")
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestFailRetryable(t *testing.T) {
 	q, mock := newMockDB(t)
 
@@ -178,6 +191,21 @@ func TestFailRetryable(t *testing.T) {
 
 	err := q.Fail(context.Background(), 10, "some error")
 	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestFailSelectReturnsWrappedError(t *testing.T) {
+	q, mock := newMockDB(t)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT attempts, max_attempts FROM`).
+		WithArgs(int64(10), q.cfg.WorkerID).
+		WillReturnError(assert.AnError)
+	mock.ExpectRollback()
+
+	err := q.Fail(context.Background(), 10, "some error")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "goqueue: fail select")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -199,6 +227,18 @@ func TestFailTerminal(t *testing.T) {
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestAbandonReturnsErrNotClaimedOnZeroRows(t *testing.T) {
+	q, mock := newMockDB(t)
+
+	mock.ExpectExec(`UPDATE`).
+		WithArgs("explicit abandon", int64(7), q.cfg.WorkerID).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+
+	err := q.Abandon(context.Background(), 7, "explicit abandon")
+	assert.ErrorIs(t, err, ErrNotClaimed)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestAbandonSetsTerminalState(t *testing.T) {
 	q, mock := newMockDB(t)
 
@@ -208,6 +248,22 @@ func TestAbandonSetsTerminalState(t *testing.T) {
 
 	err := q.Abandon(context.Background(), 7, "explicit abandon")
 	require.NoError(t, err)
+	assert.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestAutoMigrateReturnsWrappedError(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+
+	q, err := New(db, Config{QueueName: "test"})
+	require.NoError(t, err)
+
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS`).
+		WillReturnError(assert.AnError)
+
+	err = q.AutoMigrate(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "goqueue: AutoMigrate")
 	assert.NoError(t, mock.ExpectationsWereMet())
 }
 

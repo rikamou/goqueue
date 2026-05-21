@@ -68,4 +68,3 @@ func TestNullTimeValScanParsesNonNil(t *testing.T) {
 	require.NotNil(t, out)
 	assert.Equal(t, time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC), *out)
 }
-
