@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,14 @@ func TestMain(m *testing.M) {
 	if dsn == "" {
 		fmt.Fprintln(os.Stderr, "GOQUEUE_TEST_DSN not set; skipping integration tests")
 		os.Exit(0)
+	}
+	// Ensure parseTime=true so TIMESTAMP columns scan as time.Time in test assertions.
+	if !strings.Contains(dsn, "parseTime=true") {
+		sep := "?"
+		if strings.Contains(dsn, "?") {
+			sep = "&"
+		}
+		dsn += sep + "parseTime=true"
 	}
 	var err error
 	testDB, err = sql.Open("mysql", dsn)
@@ -243,9 +252,17 @@ func TestIntegrationReaperReclaimsExpiredLease(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	require.NoError(t, q.Reap(ctx))
 
-	// Job should be claimable again.
-	jobs2, err := q.Claim(ctx)
-	require.NoError(t, err)
+	// Job should be claimable again once the reaper's backoff window passes.
+	var jobs2 []goqueue.Job
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		jobs2, err = q.Claim(ctx)
+		require.NoError(t, err)
+		if len(jobs2) > 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 	assert.Len(t, jobs2, 1)
 }
 
@@ -416,14 +433,10 @@ func TestIntegrationRunWorker(t *testing.T) {
 	assert.Equal(t, 5, len(processed))
 }
 
-// TestIntegrationWorkerNoBatchLeakWithSlowHandler verifies that RunWorker forces
-// single-claim per goroutine even when ClaimBatchSize > 1 is configured.
-// Without the ClaimBatchSize=1 override in worker.go, a slow handler would allow
-// pre-claimed jobs to expire and get re-queued, causing duplicate processing.
+// TestIntegrationWorkerNoBatchLeakWithSlowHandler verifies that RunWorker does not
+// over-claim: each goroutine claims at most one job so a slow handler cannot hold
+// a batch that expires before processing starts, causing duplicate delivery.
 func TestIntegrationWorkerNoBatchLeakWithSlowHandler(t *testing.T) {
-	// LeaseTTL=2s, handler=1.5s, ClaimBatchSize=3, Concurrency=1:
-	// Without the fix, two jobs are claimed at t=0; job2's lease expires at t=2s
-	// but it only starts processing at t=1.5s, causing duplicate processing.
 	q := newQ(t, func(c *goqueue.Config) {
 		c.PollInterval = 100 * time.Millisecond
 		c.ReaperInterval = 300 * time.Millisecond

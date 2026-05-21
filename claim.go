@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func (q *Queue) Claim(ctx context.Context) ([]Job, error) {
@@ -94,6 +95,52 @@ func (q *Queue) Claim(ctx context.Context) ([]Job, error) {
 	return jobs, nil
 }
 
+// timeVal is an sql.Scanner that accepts time.Time (when parseTime=true in the
+// DSN) or a raw []byte/string from MySQL (when parseTime is absent).
+type timeVal struct{ t *time.Time }
+
+func (v timeVal) Scan(src any) error {
+	switch x := src.(type) {
+	case time.Time:
+		*v.t = x
+	case []byte:
+		return v.parseBytes(x)
+	case string:
+		return v.parseBytes([]byte(x))
+	case nil:
+		return fmt.Errorf("goqueue: unexpected NULL for non-nullable time column")
+	default:
+		return fmt.Errorf("goqueue: unsupported time type %T", src)
+	}
+	return nil
+}
+
+func (v timeVal) parseBytes(b []byte) error {
+	for _, layout := range []string{"2006-01-02 15:04:05.000000", "2006-01-02 15:04:05"} {
+		if t, err := time.ParseInLocation(layout, string(b), time.UTC); err == nil {
+			*v.t = t
+			return nil
+		}
+	}
+	return fmt.Errorf("goqueue: cannot parse %q as time", b)
+}
+
+// nullTimeVal is an sql.Scanner that accepts the same inputs as timeVal plus nil.
+type nullTimeVal struct{ t **time.Time }
+
+func (v nullTimeVal) Scan(src any) error {
+	if src == nil {
+		*v.t = nil
+		return nil
+	}
+	var tt time.Time
+	if err := (timeVal{&tt}).Scan(src); err != nil {
+		return err
+	}
+	*v.t = &tt
+	return nil
+}
+
 func scanJobs(rows *sql.Rows) ([]Job, error) {
 	var jobs []Job
 	for rows.Next() {
@@ -101,8 +148,8 @@ func scanJobs(rows *sql.Rows) ([]Job, error) {
 		var payload []byte
 		err := rows.Scan(
 			&j.ID, &j.QueueName, &j.IdempotencyKey, &payload, &j.State, &j.Priority,
-			&j.Attempts, &j.MaxAttempts, &j.NextAttemptAt, &j.ClaimedBy, &j.ClaimedAt,
-			&j.ClaimedUntil, &j.LastError, &j.CreatedAt, &j.UpdatedAt, &j.CompletedAt,
+			&j.Attempts, &j.MaxAttempts, timeVal{&j.NextAttemptAt}, &j.ClaimedBy, nullTimeVal{&j.ClaimedAt},
+			nullTimeVal{&j.ClaimedUntil}, &j.LastError, timeVal{&j.CreatedAt}, timeVal{&j.UpdatedAt}, nullTimeVal{&j.CompletedAt},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("goqueue: scan job: %w", err)
