@@ -1,4 +1,4 @@
-module github.com/user/goqueue
+module github.com/rikamou/goqueue
 
 go 1.21
 
