@@ -40,6 +40,12 @@ type Config struct {
 
 	// OnReaperError is called when Reap returns an error inside StartReaper. Optional.
 	OnReaperError func(err error)
+
+	// OnAbandoned is called when a job exhausts MaxAttempts and is permanently
+	// abandoned. It runs in the worker goroutine after the Fail DB write commits.
+	// The job's LastError field carries the final error message.
+	// If nil, abandoned jobs are silently dropped (previous behaviour).
+	OnAbandoned func(job Job)
 }
 
 // lockedRand is a concurrency-safe wrapper around *rand.Rand.

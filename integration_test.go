@@ -525,3 +525,87 @@ func TestIntegrationWorkerFailsAndRetries(t *testing.T) {
 	defer mu.Unlock()
 	assert.GreaterOrEqual(t, callCount, 3)
 }
+
+func TestIntegrationOnAbandonedFiresWhenMaxAttemptsExhausted(t *testing.T) {
+	var mu sync.Mutex
+	var abandonedJobs []goqueue.Job
+
+	q := newQ(t, func(c *goqueue.Config) {
+		c.PollInterval = 50 * time.Millisecond
+		c.BackoffBase = 100 * time.Millisecond
+		c.BackoffMax = 200 * time.Millisecond
+		c.BackoffJitter = 0
+		c.OnAbandoned = func(job goqueue.Job) {
+			mu.Lock()
+			defer mu.Unlock()
+			abandonedJobs = append(abandonedJobs, job)
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := q.Enqueue(ctx, payload(t, "will-exhaust"), goqueue.WithMaxAttempts(2))
+	require.NoError(t, err)
+
+	go q.RunWorker(ctx, func(_ context.Context, _ goqueue.Job) error {
+		return fmt.Errorf("always fails")
+	})
+
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(abandonedJobs) >= 1
+	}, 12*time.Second, 50*time.Millisecond, "OnAbandoned should fire after MaxAttempts exhausted")
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Len(t, abandonedJobs, 1, "OnAbandoned fired exactly once")
+	assert.Equal(t, 2, abandonedJobs[0].Attempts)
+}
+
+func TestIntegrationOnAbandonedNotFiredOnRetryableFailure(t *testing.T) {
+	var mu sync.Mutex
+	abandonedCalled := false
+
+	q := newQ(t, func(c *goqueue.Config) {
+		c.PollInterval = 50 * time.Millisecond
+		c.BackoffBase = 100 * time.Millisecond
+		c.BackoffMax = 200 * time.Millisecond
+		c.BackoffJitter = 0
+		c.OnAbandoned = func(_ goqueue.Job) {
+			mu.Lock()
+			defer mu.Unlock()
+			abandonedCalled = true
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	_, err := q.Enqueue(ctx, payload(t, "will-retry"), goqueue.WithMaxAttempts(3))
+	require.NoError(t, err)
+
+	var callCount int
+	processed := make(chan struct{})
+
+	go q.RunWorker(ctx, func(_ context.Context, _ goqueue.Job) error {
+		mu.Lock()
+		callCount++
+		n := callCount
+		mu.Unlock()
+		if n == 1 {
+			return fmt.Errorf("first failure")
+		}
+		close(processed)
+		return nil
+	})
+
+	select {
+	case <-processed:
+	case <-ctx.Done():
+		t.Fatal("job was not processed successfully within timeout")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.False(t, abandonedCalled, "OnAbandoned must not fire when job eventually succeeds")
+}

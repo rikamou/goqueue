@@ -77,6 +77,8 @@ func (q *Queue) RunWorker(ctx context.Context, handler HandlerFunc) {
 							defer failCancel()
 							if ferr := q.Fail(failCtx, j.ID, msg); ferr != nil && q.cfg.OnError != nil {
 								q.cfg.OnError(j, "fail", ferr)
+							} else if ferr == nil && j.Attempts >= j.MaxAttempts && q.cfg.OnAbandoned != nil {
+								callSafe(func() { q.cfg.OnAbandoned(j) })
 							}
 						}
 					}()
@@ -87,6 +89,8 @@ func (q *Queue) RunWorker(ctx context.Context, handler HandlerFunc) {
 					if herr := handler(ctx, j); herr != nil {
 						if ferr := q.Fail(opCtx, j.ID, herr.Error()); ferr != nil && q.cfg.OnError != nil {
 							q.cfg.OnError(j, "fail", ferr)
+						} else if ferr == nil && j.Attempts >= j.MaxAttempts && q.cfg.OnAbandoned != nil {
+							callSafe(func() { q.cfg.OnAbandoned(j) })
 						}
 					} else {
 						if cerr := q.Complete(opCtx, j.ID); cerr != nil && q.cfg.OnError != nil {
@@ -97,4 +101,11 @@ func (q *Queue) RunWorker(ctx context.Context, handler HandlerFunc) {
 			}
 		}
 	}
+}
+
+// callSafe calls fn and recovers any panic it raises, preventing user-supplied
+// callbacks (e.g. OnAbandoned) from crashing the worker goroutine.
+func callSafe(fn func()) {
+	defer func() { recover() }()
+	fn()
 }
