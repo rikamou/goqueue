@@ -67,6 +67,7 @@ q.RunWorker(ctx, func(ctx context.Context, job goqueue.Job) error {
 Notes:
 - `LeaseTTL`, `WithDelay`, backoff, and `ExtendLease` are implemented in MySQL using `... INTERVAL ? SECOND`, so they have 1-second resolution. Sub-second values are rounded up to the next second.
 - `BackoffJitter` is opt-in: `0` disables jitter. When enabled, jitter is sampled uniformly from `[0, BackoffJitter]` and then clamped by `BackoffMax`. `BackoffJitter` must be `<= BackoffMax`.
+- `StartReaper` runs one pass immediately on startup, then repeats every `ReaperInterval`. `RunWorker` starts it automatically.
 
 ## Backoff formula
 
