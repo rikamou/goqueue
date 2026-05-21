@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/stretchr/testify/assert"
@@ -53,6 +54,38 @@ func TestNewZeroBackoffJitterIsValid(t *testing.T) {
 	q, err := New(db, Config{QueueName: "test", BackoffJitter: 0})
 	require.NoError(t, err)
 	assert.Equal(t, 0, int(q.cfg.BackoffJitter))
+}
+
+func TestNewRejectsJitterExceedingBackoffMax(t *testing.T) {
+	db, _, _ := sqlmock.New()
+	_, err := New(db, Config{
+		QueueName:     "test",
+		BackoffMax:    10 * time.Minute,
+		BackoffJitter: 11 * time.Minute,
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "BackoffJitter")
+}
+
+func TestNewRejectsNullByteQueueName(t *testing.T) {
+	db, _, _ := sqlmock.New()
+	_, err := New(db, Config{QueueName: "test\x00name"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "null")
+}
+
+func TestNewRejectsNegativeLeaseTTL(t *testing.T) {
+	db, _, _ := sqlmock.New()
+	_, err := New(db, Config{QueueName: "test", LeaseTTL: -1 * time.Second})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "LeaseTTL")
+}
+
+func TestNewRejectsNullByteWorkerID(t *testing.T) {
+	db, _, _ := sqlmock.New()
+	_, err := New(db, Config{QueueName: "test", WorkerID: "w\x00id"})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "worker ID")
 }
 
 func TestEnqueueInvalidJSONReturnsError(t *testing.T) {

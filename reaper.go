@@ -6,19 +6,26 @@ import (
 	"time"
 )
 
-// Reap runs a single reaper pass: expired leases are re-queued with per-job
-// exponential backoff, or abandoned if max_attempts is exhausted.
+// Reap runs a single reaper pass. Both UPDATEs run in one transaction so they
+// cannot interleave with a concurrent Reap or Claim.
 func (q *Queue) Reap(ctx context.Context) error {
+	tx, err := q.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("goqueue: reaper begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+
 	baseSecs := durationToSecs(q.cfg.BackoffBase)
 	maxSecs := durationToSecs(q.cfg.BackoffMax)
 
-	// Uses the same exponential formula as calcBackoff but without jitter,
-	// since per-row random values cannot be added in a single SQL UPDATE.
+	// Note: this rescheduling is intentionally deterministic and does not apply jitter.
+	// This allows reclaiming many rows with a single UPDATE, but can cause correlated
+	// retries after a mass lease expiry (e.g. crash recovery).
 	reclaimSQL := fmt.Sprintf(
 		"UPDATE %s SET state='pending', claimed_by=NULL, claimed_at=NULL, claimed_until=NULL, next_attempt_at=NOW() + INTERVAL LEAST(? * POW(2, attempts-1), ?) SECOND WHERE queue_name=? AND state='claimed' AND claimed_until < NOW() AND attempts < max_attempts",
 		q.table(),
 	)
-	if _, err := q.db.ExecContext(ctx, reclaimSQL, baseSecs, maxSecs, q.cfg.QueueName); err != nil {
+	if _, err := tx.ExecContext(ctx, reclaimSQL, baseSecs, maxSecs, q.cfg.QueueName); err != nil {
 		return fmt.Errorf("goqueue: reaper reclaim: %w", err)
 	}
 
@@ -26,10 +33,13 @@ func (q *Queue) Reap(ctx context.Context) error {
 		"UPDATE %s SET state='abandoned', claimed_by=NULL, claimed_at=NULL, claimed_until=NULL, completed_at=NOW() WHERE queue_name=? AND state='claimed' AND claimed_until < NOW() AND attempts >= max_attempts",
 		q.table(),
 	)
-	if _, err := q.db.ExecContext(ctx, abandonSQL, q.cfg.QueueName); err != nil {
+	if _, err := tx.ExecContext(ctx, abandonSQL, q.cfg.QueueName); err != nil {
 		return fmt.Errorf("goqueue: reaper abandon: %w", err)
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("goqueue: reaper commit: %w", err)
+	}
 	return nil
 }
 
@@ -41,6 +51,10 @@ func (q *Queue) StartReaper(ctx context.Context) (cancel func(), done <-chan str
 	doneCh := make(chan struct{})
 	go func() {
 		defer close(doneCh)
+		// Run once immediately so leases expired during a prior crash are recovered before the first tick.
+		if err := q.Reap(ctx); err != nil && q.cfg.OnReaperError != nil {
+			q.cfg.OnReaperError(err)
+		}
 		ticker := time.NewTicker(q.cfg.ReaperInterval)
 		defer ticker.Stop()
 		for {

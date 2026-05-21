@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// DDL returns the CREATE TABLE statement for the queue_jobs table.
+// DDL returns the CREATE TABLE statement for the configured table.
 func (q *Queue) DDL() string {
 	return fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s` (\n"+
 		"  id              BIGINT        NOT NULL AUTO_INCREMENT,\n"+
@@ -32,7 +32,7 @@ func (q *Queue) DDL() string {
 		q.cfg.TableName)
 }
 
-// AutoMigrate creates the queue_jobs table if it does not already exist.
+// AutoMigrate creates the configured table if it does not already exist.
 func (q *Queue) AutoMigrate(ctx context.Context) error {
 	_, err := q.db.ExecContext(ctx, q.DDL())
 	if err != nil {

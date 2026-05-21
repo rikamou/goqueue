@@ -8,7 +8,6 @@ import (
 	"strings"
 )
 
-// Claim atomically claims up to ClaimBatchSize pending jobs and returns them.
 func (q *Queue) Claim(ctx context.Context) ([]Job, error) {
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -55,7 +54,7 @@ func (q *Queue) Claim(ctx context.Context) ([]Job, error) {
 	}
 
 	updateSQL := fmt.Sprintf(
-		"UPDATE %s SET state='claimed', claimed_by=?, claimed_at=NOW(), claimed_until=NOW() + INTERVAL ? SECOND, attempts=attempts+1 WHERE id IN (%s)",
+		"UPDATE %s SET state='claimed', claimed_by=?, claimed_at=NOW(), claimed_until=NOW() + INTERVAL ? SECOND, attempts=attempts+1 WHERE id IN (%s) AND state='pending'",
 		q.table(),
 		strings.Join(placeholders, ","),
 	)
@@ -64,13 +63,14 @@ func (q *Queue) Claim(ctx context.Context) ([]Job, error) {
 		return nil, fmt.Errorf("goqueue: claim update: %w", err)
 	}
 
+	// Re-fetch claimed rows so DB-authored fields (claimed_at/claimed_until/updated_at)
+	// reflect the actual values stored in MySQL.
 	fetchPlaceholders := make([]string, len(ids))
 	fetchArgs := make([]any, len(ids))
 	for i, id := range ids {
 		fetchPlaceholders[i] = "?"
 		fetchArgs[i] = id
 	}
-
 	fetchSQL := fmt.Sprintf(
 		"SELECT id, queue_name, idempotency_key, payload, state, priority, attempts, max_attempts, next_attempt_at, claimed_by, claimed_at, claimed_until, last_error, created_at, updated_at, completed_at FROM %s WHERE id IN (%s) ORDER BY priority DESC, id ASC",
 		q.table(),
@@ -91,11 +91,9 @@ func (q *Queue) Claim(ctx context.Context) ([]Job, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("goqueue: claim commit: %w", err)
 	}
-
 	return jobs, nil
 }
 
-// scanJobs scans all rows into Job structs.
 func scanJobs(rows *sql.Rows) ([]Job, error) {
 	var jobs []Job
 	for rows.Next() {

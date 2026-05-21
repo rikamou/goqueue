@@ -64,10 +64,15 @@ q.RunWorker(ctx, func(ctx context.Context, job goqueue.Job) error {
 | WorkerID       | hostname-pid         |
 | TableName      | queue_jobs           |
 
+Notes:
+- `LeaseTTL`, `WithDelay`, backoff, and `ExtendLease` are implemented in MySQL using `... INTERVAL ? SECOND`, so they have 1-second resolution. Sub-second values are rounded up to the next second.
+- `BackoffJitter` is opt-in: `0` disables jitter. When enabled, jitter is sampled uniformly from `[0, BackoffJitter]` and then clamped by `BackoffMax`. `BackoffJitter` must be `<= BackoffMax`.
+
 ## Backoff formula
 
 ```
-delay = min(BackoffBase * 2^(attempt-1) + rand(0, BackoffJitter), BackoffMax)
+base  = min(BackoffBase * 2^(attempt-1), BackoffMax)
+delay = min(base + rand(0, BackoffJitter), BackoffMax)
 ```
 
 ## State machine

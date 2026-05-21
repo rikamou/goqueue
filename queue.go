@@ -6,6 +6,7 @@ import (
 	"math/rand"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,7 +21,9 @@ type Config struct {
 	MaxAttempts    int           // default 8
 	BackoffBase    time.Duration // default 5s
 	BackoffMax     time.Duration // default 10m
-	BackoffJitter  time.Duration // 0 disables jitter; positive adds random [0,jitter); negative is invalid
+	// BackoffJitter enables random jitter added to backoff delays.
+	// 0 disables jitter; positive samples a random duration in [0, BackoffJitter] (inclusive).
+	BackoffJitter  time.Duration
 	ReaperInterval time.Duration // default 30s
 	PollInterval   time.Duration // default 2s
 	Concurrency    int           // default 1
@@ -70,10 +73,16 @@ func New(db *sql.DB, cfg Config) (*Queue, error) {
 	if len(cfg.QueueName) > 128 {
 		return nil, fmt.Errorf("goqueue: queue name exceeds 128 characters")
 	}
+	if strings.ContainsRune(cfg.QueueName, 0) {
+		return nil, fmt.Errorf("goqueue: queue name must not contain null bytes")
+	}
 	if cfg.ClaimBatchSize <= 0 {
 		cfg.ClaimBatchSize = 1
 	}
-	if cfg.LeaseTTL <= 0 {
+	if cfg.LeaseTTL < 0 {
+		return nil, fmt.Errorf("goqueue: LeaseTTL must not be negative")
+	}
+	if cfg.LeaseTTL == 0 {
 		cfg.LeaseTTL = 5 * time.Minute
 	}
 	if cfg.LeaseTTL < time.Second {
@@ -91,6 +100,9 @@ func New(db *sql.DB, cfg Config) (*Queue, error) {
 	if cfg.BackoffJitter < 0 {
 		return nil, fmt.Errorf("goqueue: BackoffJitter must be >= 0 (use 0 to disable jitter)")
 	}
+	if cfg.BackoffJitter > cfg.BackoffMax {
+		return nil, fmt.Errorf("goqueue: BackoffJitter (%v) must not exceed BackoffMax (%v)", cfg.BackoffJitter, cfg.BackoffMax)
+	}
 	if cfg.ReaperInterval <= 0 {
 		cfg.ReaperInterval = 30 * time.Second
 	}
@@ -102,6 +114,9 @@ func New(db *sql.DB, cfg Config) (*Queue, error) {
 	}
 	if cfg.WorkerID == "" {
 		cfg.WorkerID = defaultWorkerID()
+	}
+	if strings.ContainsRune(cfg.WorkerID, 0) {
+		return nil, fmt.Errorf("goqueue: worker ID must not contain null bytes")
 	}
 	if len(cfg.WorkerID) > 128 {
 		return nil, fmt.Errorf("goqueue: worker ID exceeds 128 characters")

@@ -6,12 +6,28 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 )
+
+const maxErrMsgLen = 4096
+
+// truncateErrMsg caps error strings at maxErrMsgLen bytes to prevent storage bloat.
+// It walks back to a valid UTF-8 rune boundary so the result is never malformed.
+func truncateErrMsg(s string) string {
+	if len(s) <= maxErrMsgLen {
+		return s
+	}
+	end := maxErrMsgLen
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end] + "...(truncated)"
+}
 
 // Complete marks a claimed job as done.
 func (q *Queue) Complete(ctx context.Context, jobID int64) error {
 	query := fmt.Sprintf(
-		"UPDATE %s SET state='done', completed_at=NOW() WHERE id=? AND claimed_by=? AND state='claimed'",
+		"UPDATE %s SET state='done', completed_at=NOW() WHERE id=? AND claimed_by=? AND state='claimed' AND claimed_until >= NOW()",
 		q.table(),
 	)
 	res, err := q.db.ExecContext(ctx, query, jobID, q.cfg.WorkerID)
@@ -31,6 +47,7 @@ func (q *Queue) Complete(ctx context.Context, jobID int64) error {
 // Fail records an error on a claimed job. If the job has remaining attempts it
 // is re-queued with exponential backoff; otherwise it is permanently abandoned.
 func (q *Queue) Fail(ctx context.Context, jobID int64, errMsg string) error {
+	errMsg = truncateErrMsg(errMsg)
 	tx, err := q.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("goqueue: fail begin tx: %w", err)
@@ -39,7 +56,7 @@ func (q *Queue) Fail(ctx context.Context, jobID int64, errMsg string) error {
 
 	var attempts, maxAttempts int
 	selSQL := fmt.Sprintf(
-		"SELECT attempts, max_attempts FROM %s WHERE id=? AND claimed_by=? AND state='claimed' FOR UPDATE",
+		"SELECT attempts, max_attempts FROM %s WHERE id=? AND claimed_by=? AND state='claimed' AND claimed_until >= NOW() FOR UPDATE",
 		q.table(),
 	)
 	err = tx.QueryRowContext(ctx, selSQL, jobID, q.cfg.WorkerID).Scan(&attempts, &maxAttempts)
@@ -69,11 +86,15 @@ func (q *Queue) Fail(ctx context.Context, jobID int64, errMsg string) error {
 			return fmt.Errorf("goqueue: fail abandon: %w", err)
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("goqueue: fail commit: %w", err)
+	}
+	return nil
 }
 
 // Abandon immediately moves a claimed job to the terminal abandoned state.
 func (q *Queue) Abandon(ctx context.Context, jobID int64, errMsg string) error {
+	errMsg = truncateErrMsg(errMsg)
 	query := fmt.Sprintf(
 		"UPDATE %s SET state='abandoned', claimed_by=NULL, claimed_at=NULL, claimed_until=NULL, completed_at=NOW(), last_error=? WHERE id=? AND claimed_by=? AND state='claimed'",
 		q.table(),

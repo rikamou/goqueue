@@ -1,6 +1,9 @@
 package goqueue
 
-import "time"
+import (
+	"math"
+	"time"
+)
 
 // calcBackoff returns the delay before the next attempt using saturating
 // exponential backoff with optional jitter.
@@ -24,7 +27,12 @@ func (q *Queue) calcBackoff(attempt int) time.Duration {
 	}
 	var jitter time.Duration
 	if q.cfg.BackoffJitter > 0 {
-		jitter = time.Duration(q.rng.Int63n(int64(q.cfg.BackoffJitter) + 1))
+		// Defend against int64 overflow on +1 for extreme durations.
+		n := int64(q.cfg.BackoffJitter)
+		if n == math.MaxInt64 {
+			n--
+		}
+		jitter = time.Duration(q.rng.Int63n(n + 1))
 	}
 	delay := base + jitter
 	if delay > q.cfg.BackoffMax || delay < 0 {

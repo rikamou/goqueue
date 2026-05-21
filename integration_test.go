@@ -416,6 +416,60 @@ func TestIntegrationRunWorker(t *testing.T) {
 	assert.Equal(t, 5, len(processed))
 }
 
+// TestIntegrationWorkerNoBatchLeakWithSlowHandler verifies that RunWorker forces
+// single-claim per goroutine even when ClaimBatchSize > 1 is configured.
+// Without the ClaimBatchSize=1 override in worker.go, a slow handler would allow
+// pre-claimed jobs to expire and get re-queued, causing duplicate processing.
+func TestIntegrationWorkerNoBatchLeakWithSlowHandler(t *testing.T) {
+	// LeaseTTL=2s, handler=1.5s, ClaimBatchSize=3, Concurrency=1:
+	// Without the fix, two jobs are claimed at t=0; job2's lease expires at t=2s
+	// but it only starts processing at t=1.5s, causing duplicate processing.
+	q := newQ(t, func(c *goqueue.Config) {
+		c.PollInterval = 100 * time.Millisecond
+		c.ReaperInterval = 300 * time.Millisecond
+		c.LeaseTTL = 2 * time.Second
+		c.ClaimBatchSize = 3
+		c.Concurrency = 1
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	_, err := q.Enqueue(ctx, payload(t, 1))
+	require.NoError(t, err)
+	_, err = q.Enqueue(ctx, payload(t, 2))
+	require.NoError(t, err)
+
+	var mu sync.Mutex
+	processCount := make(map[int64]int)
+
+	go q.RunWorker(ctx, func(ctx context.Context, job goqueue.Job) error {
+		time.Sleep(1500 * time.Millisecond) // slow: exceeds LeaseTTL/2
+		mu.Lock()
+		processCount[job.ID]++
+		mu.Unlock()
+		return nil
+	})
+
+	// Wait until both jobs are processed.
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		mu.Lock()
+		n := len(processCount)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, processCount, 2, "both jobs should be processed")
+	for id, count := range processCount {
+		assert.Equal(t, 1, count, "job %d should be processed exactly once, got %d", id, count)
+	}
+}
+
 func TestIntegrationWorkerFailsAndRetries(t *testing.T) {
 	q := newQ(t, func(c *goqueue.Config) {
 		c.PollInterval = 200 * time.Millisecond

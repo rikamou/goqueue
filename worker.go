@@ -2,6 +2,7 @@ package goqueue
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -13,8 +14,9 @@ type HandlerFunc func(ctx context.Context, job Job) error
 // It blocks until ctx is cancelled. The reaper is started automatically and
 // stopped when the worker exits.
 //
-// RunWorker always claims one job per goroutine regardless of ClaimBatchSize,
-// preventing lease expiry on unprocessed jobs queued within a batch.
+// On each poll tick a single Claim call is issued with a batch size equal to
+// the number of available concurrency slots, eliminating the per-slot DB round-
+// trips that occur when the queue is idle.
 func (q *Queue) RunWorker(ctx context.Context, handler HandlerFunc) {
 	cancelReaper, reaperDone := q.StartReaper(ctx)
 	defer func() {
@@ -25,10 +27,6 @@ func (q *Queue) RunWorker(ctx context.Context, handler HandlerFunc) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, q.cfg.Concurrency)
 
-	singleCfg := q.cfg
-	singleCfg.ClaimBatchSize = 1
-	single := &Queue{db: q.db, cfg: singleCfg, rng: q.rng}
-
 	ticker := time.NewTicker(q.cfg.PollInterval)
 	defer ticker.Stop()
 
@@ -38,29 +36,61 @@ func (q *Queue) RunWorker(ctx context.Context, handler HandlerFunc) {
 			wg.Wait()
 			return
 		case <-ticker.C:
+			// Acquire semaphore slots before claiming: a blocking send after claim
+			// would let leases tick down while unprocessed, causing the reaper to
+			// reclaim and re-run them (duplicate processing).
+			acquired := 0
 			for i := 0; i < q.cfg.Concurrency; i++ {
 				select {
 				case sem <- struct{}{}:
+					acquired++
 				default:
-					continue
 				}
+			}
+			if acquired == 0 {
+				continue
+			}
+			batchCfg := q.cfg
+			batchCfg.ClaimBatchSize = acquired
+			batchQ := &Queue{db: q.db, cfg: batchCfg, rng: q.rng}
+			jobs, err := batchQ.Claim(ctx)
+			if err != nil || len(jobs) == 0 {
+				for i := 0; i < acquired; i++ {
+					<-sem
+				}
+				continue
+			}
+			// Release slots not consumed by actual jobs.
+			for i := len(jobs); i < acquired; i++ {
+				<-sem
+			}
+			for _, job := range jobs {
+				j := job
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
 					defer func() { <-sem }()
-
-					jobs, err := single.Claim(ctx)
-					if err != nil || len(jobs) == 0 {
-						return
-					}
-					job := jobs[0]
-					if herr := handler(ctx, job); herr != nil {
-						if ferr := q.Fail(ctx, job.ID, herr.Error()); ferr != nil && q.cfg.OnError != nil {
-							q.cfg.OnError(job, "fail", ferr)
+					defer func() {
+						if r := recover(); r != nil {
+							msg := fmt.Sprintf("panic: %v", r)
+							failCtx, failCancel := context.WithTimeout(context.Background(), 30*time.Second)
+							defer failCancel()
+							if ferr := q.Fail(failCtx, j.ID, msg); ferr != nil && q.cfg.OnError != nil {
+								q.cfg.OnError(j, "fail", ferr)
+							}
+						}
+					}()
+					// Detach from worker ctx so Fail/Complete can write to DB even
+					// after ctx is cancelled on graceful shutdown.
+					opCtx, opCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+					defer opCancel()
+					if herr := handler(ctx, j); herr != nil {
+						if ferr := q.Fail(opCtx, j.ID, herr.Error()); ferr != nil && q.cfg.OnError != nil {
+							q.cfg.OnError(j, "fail", ferr)
 						}
 					} else {
-						if cerr := q.Complete(ctx, job.ID); cerr != nil && q.cfg.OnError != nil {
-							q.cfg.OnError(job, "complete", cerr)
+						if cerr := q.Complete(opCtx, j.ID); cerr != nil && q.cfg.OnError != nil {
+							q.cfg.OnError(j, "complete", cerr)
 						}
 					}
 				}()
