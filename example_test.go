@@ -14,7 +14,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/user/goqueue"
+	"github.com/rikamou/goqueue"
 )
 
 // EmailPayload is an example typed job payload for an email queue.
